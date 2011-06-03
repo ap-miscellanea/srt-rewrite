@@ -23,6 +23,7 @@ sub parse_cmdline_time {
 		'from|f=s'  => sub { $opt_from  = parse_cmdline_time $_[1] },
 		'until|u=s' => sub { $opt_until = parse_cmdline_time $_[1] },
 		'sub=s'     => \( my $opt_sub ),
+		'sami'      => \( my $opt_smi ),
 	) or exit 1;
 
 	if ( defined $opt_sub ) {
@@ -39,9 +40,11 @@ sub parse_cmdline_time {
 
 	binmode STDOUT, ':crlf' if $slurp =~ s/\r//g;
 
-	my @chunk = $opt_sub
-		? Chunk::MicroDVD->parse_stream( $slurp, $opt_sub )
-		: Chunk::SRT     ->parse_stream( $slurp );
+	my @chunk =
+		$opt_sub ? Chunk::MicroDVD->parse_stream( $slurp, $opt_sub ) :
+		$opt_smi ? Chunk::SAMI    ->parse_stream( $slurp )           :
+		do {       Chunk::SRT     ->parse_stream( $slurp ) }
+		;
 
 	if ( defined $opt_from and defined $opt_until ) {
 		say STDERR "Stretching subtitles from $opt_from to $opt_until";
@@ -139,3 +142,42 @@ sub parse {
 }
 
 sub split { split /\n/, $_[1] }
+
+
+package Chunk::SAMI; ########################################### .SMI format
+use parent -norequire => 'Chunk';
+
+sub parse {
+	my $self = shift->new;
+	my ( $chunk ) = @_;
+
+	use Data::Dump 'pp';
+
+	$chunk =~ s/<sync(?: ([^>]*))?>//si or return;
+	my ( undef, %attr ) = split / *(\w+)=/, $1;
+	do { my @k = keys %attr; @attr{ map lc, @k } = delete @attr{ @k } };
+	( $self->from, $self->to ) = @attr{ qw( start end ) };
+
+	require HTML::Entities;
+
+	for ( $self->text = $chunk ) {
+		s!</sync *>!!;
+		s!(?<=\w) *\n[\n ]*(?=\w)! !g;
+		s!\n+!!g;
+		s!<(?:p|br)(?: [^>]*)?/?>!\n!gi;
+		s!<(?:p|br)(?: [^>]*)?/?>!\n!gi;
+		s!<[^>]*>!!;
+		$_ = HTML::Entities::decode( $_ );
+		s!\xA0! !g;
+		s![ \t]{2,}! !g;
+		s! \+\Z!!mg;
+		s!\A[\n ]+!!;
+		s![\n ]+\z!!;
+		return if not length;
+		$_ .= "\n";
+	}
+
+	return $self;
+}
+
+sub split { $_[1] =~ m!<body(?: [^>]*)?>(.*)</body>!sgi ? split /(?=<sync[ >])/i, $1 : () }
