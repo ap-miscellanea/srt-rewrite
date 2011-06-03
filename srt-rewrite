@@ -1,0 +1,141 @@
+#!/usr/bin/env perl
+use 5.010;
+use strict;
+use Getopt::Long 2.24, qw( :config bundling no_ignore_case no_auto_abbrev );
+
+sub parse_cmdline_time {
+	my ( $time ) = @_;
+	return 0 if not defined $time;
+	$time =~ /\A(?:(?:(?:(?<h>\d\d):)?(?<m>\d\d):)?(?<s>\d\d),)?(?<ms>\d{3})\z/
+		or return $time;
+	my %c = %+;
+	$_ = 0 for grep { not defined } @c{ qw( h m s ms ) };
+	my $t = 1000 * ( 60 * ( 60 * $c{h} + $c{m} ) + $c{s} ) + $c{ms};
+	return $t;
+}
+
+{
+	my ( $opt_speed, $opt_shift, $opt_from, $opt_until ) = 1;
+
+	GetOptions(
+		'speed|S=s' => \$opt_speed,
+		'shift|s=s' => sub { $opt_shift = parse_cmdline_time $_[1] },
+		'from|f=s'  => sub { $opt_from  = parse_cmdline_time $_[1] },
+		'until|u=s' => sub { $opt_until = parse_cmdline_time $_[1] },
+		'sub=s'     => \( my $opt_sub ),
+	) or exit 1;
+
+	if ( defined $opt_sub ) {
+		my %fps = (
+			$opt_sub => $opt_sub,
+			ntsc30   => 29.97,
+			ntsc     => 23.976,
+			pal      => 25,
+		);
+		$opt_sub = $fps{ $opt_sub };
+	}
+
+	my $slurp = do { local $/; <> };
+
+	binmode STDOUT, ':crlf' if $slurp =~ s/\r//g;
+
+	my @chunk = $opt_sub
+		? Chunk::MicroDVD->parse_stream( $slurp, $opt_sub )
+		: Chunk::SRT     ->parse_stream( $slurp );
+
+	if ( defined $opt_from and defined $opt_until ) {
+		say STDERR "Stretching subtitles from $opt_from to $opt_until";
+		my $reset = $chunk[0]->from;
+		for ( @chunk ) { $_ -= $reset for $_->from, $_->to }
+		$opt_speed = ( $opt_until - $opt_from ) / $chunk[-1]->from;
+		$opt_shift = $opt_from;
+	}
+
+	say STDERR "Scaling by a factor of $opt_speed" if $opt_speed != 1.0;
+	say STDERR "Shifting by $opt_shift miliseconds" if defined $opt_shift;
+
+	for ( @chunk ) {
+		$_ *= $opt_speed for $_->from, $_->to;
+		$_ += $opt_shift for $_->from, $_->to;
+	}
+
+	my @sorted_idx = sort { $chunk[$a]->from <=> $chunk[$b]->from } 0 .. $#chunk;
+
+	for ( 0 .. $#sorted_idx ) {
+		say $chunk[$sorted_idx[$_]]->as_string( $_ + 1 );
+	}
+}
+
+package Chunk; #################################################################
+use Object::Tiny::Lvalue qw( from to text );
+
+sub format_time {
+	my $invocant = shift;
+	my ( $t ) = @_;
+	my $ms = 1000;
+	my $s  = 60;
+	my $m  = 60;
+	for my $unit ( $ms, $s, $m ) {
+		( $unit, $t ) = ( $t % $unit, int $t / $unit );
+	}
+	sprintf '%02d:%02d:%02d,%03d', $t, $m, $s, $ms;
+}
+
+sub as_string {
+	my $self = shift;
+	my ( $idx ) = @_;
+	my $time = join ' --> ', map { $self->format_time( $_ ) } $self->from, $self->to;
+	( my $text = $self->text ) =~ s!\n*\z!!;
+	join "\n", $idx, $time, $text, '';
+}
+
+sub parse_stream {
+	my $self = shift;
+	my $stream = shift;
+	map $self->parse( $_, @_ ), $self->split( $stream );
+}
+
+
+package Chunk::SRT; ############################################################
+use parent -norequire => 'Chunk';
+
+sub parse_time {
+	my $invocant = shift;
+	my ( $time ) = @_;
+	$time =~ /\A(?<h>\d\d):(?<m>\d\d):(?<s>\d\d),(?<ms>\d{3})\z/
+		or return;
+	my $t = 1000 * ( 60 * ( 60 * $+{h} + $+{m} ) + $+{s} ) + $+{ms};
+	return $t;
+}
+
+sub parse {
+	my $self = shift->new;
+	my ( $chunk ) = @_;
+	( undef, my $time, $self->text ) = split /\n/, $chunk, 3;
+	( $self->from, $self->to ) = map { $self->parse_time( $_ ) } split / --> /, $time;
+	return $self;
+}
+
+sub split { split /\n\s*\n/, $_[1] }
+
+
+package Chunk::MicroDVD; ########################################### .SUB format
+use parent -norequire => 'Chunk';
+
+sub parse_frames {
+	my $invocant = shift;
+	my ( $frames, $fps ) = @_;
+	return if not defined $frames;
+	return ( $frames * 1000.0 ) / $fps;
+}
+
+sub parse {
+	my $self = shift->new;
+	my ( $chunk, $fps ) = @_;
+	$chunk =~ m/\A\{(\d+)\}\{(\d+)\}(.+)\z/s or return;
+	( $self->from, $self->to ) = map { $self->parse_frames( $_, $fps ) } $1, $2;
+	( $self->text = $3 . "\n" ) =~ s!\|!\n!g;
+	return $self;
+}
+
+sub split { split /\n/, $_[1] }
