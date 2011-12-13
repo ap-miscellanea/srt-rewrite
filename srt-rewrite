@@ -45,29 +45,25 @@ sub parse_cmdline_time {
 		$opt_smi ? Stream::SAMI->new :
 		do       { Stream::SRT->new };
 
-	my @chunk = $stream->parse( $slurp );
+	$stream->parse( $slurp );
 
 	if ( defined $opt_from and defined $opt_until ) {
 		say STDERR "Stretching subtitles from $opt_from to $opt_until";
-		my $reset = $chunk[0]->from;
-		for ( @chunk ) { $_ -= $reset for $_->from, $_->to }
-		$opt_speed = ( $opt_until - $opt_from ) / $chunk[-1]->from;
+		my $reset = $stream->chunk->[0]->from;
+		for ( $stream->chunks ) { $_ -= $reset for $_->from, $_->to }
+		$opt_speed = ( $opt_until - $opt_from ) / $stream->chunk->[-1]->from;
 		$opt_shift = $opt_from;
 	}
 
 	say STDERR "Scaling by a factor of $opt_speed" if $opt_speed != 1.0;
 	say STDERR "Shifting by $opt_shift miliseconds" if defined $opt_shift;
 
-	for ( @chunk ) {
+	for ( $stream->chunks ) {
 		$_ *= $opt_speed for $_->from, $_->to;
 		$_ += $opt_shift for $_->from, $_->to;
 	}
 
-	my @sorted_idx = sort { $chunk[$a]->from <=> $chunk[$b]->from } 0 .. $#chunk;
-
-	for ( 0 .. $#sorted_idx ) {
-		say Stream::SRT->format_chunk( $chunk[$sorted_idx[$_]], $_ + 1 );
-	}
+	Stream::SRT->new->from( $stream )->print;
 }
 
 package Chunk; #################################################################
@@ -75,15 +71,28 @@ use Object::Tiny::Lvalue qw( from to text );
 
 
 package Stream; ################################################################
+use Object::Tiny::Lvalue qw( chunk );
 
 sub parse_chunk { die }
 
 sub split { die }
 
+sub chunks { @{ shift->chunk // [] } }
+
 sub parse {
 	my $self = shift;
 	my $stream = shift;
-	map $self->parse_chunk( $_, @_ ), $self->split( $stream );
+	push @{ $self->chunk }, $self->parse_chunk( $_, @_ )
+		for $self->split( $stream );
+}
+
+sub from {
+	my $self = shift;
+	my ( $stream ) = @_;
+	my @from = map { $_->from } $stream->chunks;
+	my @sorted_idx = sort { $from[$a] <=> $from[$b] } 0 .. $#from;
+	$self->chunk = [ @{ $stream->chunk }[ @sorted_idx ] ];
+	$self;
 }
 
 
@@ -127,6 +136,12 @@ sub format_chunk {
 	my $time = join ' --> ', map { $self->format_time( $_ ) } $chunk->from, $chunk->to;
 	( my $text = $chunk->text ) =~ s!\n*\z!!;
 	join "\n", $idx, $time, $text, '';
+}
+
+sub print {
+	my $self = shift;
+	my $i;
+	say $stream->format_chunk( $_, ++$i ) for $self->chunks;
 }
 
 
