@@ -41,9 +41,9 @@ sub parse_cmdline_time {
 	binmode STDOUT, ':crlf' if $slurp =~ s/\r//g;
 
 	my @chunk =
-		$opt_sub ? Chunk::MicroDVD->parse_stream( $slurp, $opt_sub ) :
-		$opt_smi ? Chunk::SAMI    ->parse_stream( $slurp )           :
-		do {       Chunk::SRT     ->parse_stream( $slurp ) }
+		$opt_sub ? Stream::MicroDVD->parse( $slurp, $opt_sub ) :
+		$opt_smi ? Stream::SAMI    ->parse( $slurp )           :
+		do {       Stream::SRT     ->parse( $slurp ) }
 		;
 
 	if ( defined $opt_from and defined $opt_until ) {
@@ -65,15 +65,51 @@ sub parse_cmdline_time {
 	my @sorted_idx = sort { $chunk[$a]->from <=> $chunk[$b]->from } 0 .. $#chunk;
 
 	for ( 0 .. $#sorted_idx ) {
-		say $chunk[$sorted_idx[$_]]->as_string( $_ + 1 );
+		say Stream::SRT->format_chunk( $chunk[$sorted_idx[$_]], $_ + 1 );
 	}
 }
 
 package Chunk; #################################################################
 use Object::Tiny::Lvalue qw( from to text );
 
+
+package Stream; ################################################################
+
+sub parse_chunk { die }
+
+sub split { die }
+
+sub parse {
+	my $self = shift;
+	my $stream = shift;
+	map $self->parse_chunk( $_, @_ ), $self->split( $stream );
+}
+
+
+package Stream::SRT; ###########################################################
+use parent -norequire => 'Stream';
+
+sub parse_time {
+	my $self = shift;
+	my ( $time ) = @_;
+	$time =~ /\A(?<h>\d\d):(?<m>\d\d):(?<s>\d\d),(?<ms>\d{3})\z/
+		or return;
+	my $t = 1000 * ( 60 * ( 60 * $+{h} + $+{m} ) + $+{s} ) + $+{ms};
+	return $t;
+}
+
+sub parse_chunk {
+	my $self = shift;
+	my ( $chunk ) = @_;
+	( undef, my $time, my $text ) = split /\n/, $chunk, 3;
+	my ( $from, $to ) = map { $self->parse_time( $_ ) } split / --> /, $time;
+	return Chunk->new( from => $from, to => $to, text => $text );
+}
+
+sub split { split /\n\s*\n/, $_[1] }
+
 sub format_time {
-	my $invocant = shift;
+	my $self = shift;
 	my ( $t ) = @_;
 	my $ms = 1000;
 	my $s  = 60;
@@ -84,81 +120,53 @@ sub format_time {
 	sprintf '%02d:%02d:%02d,%03d', $t, $m, $s, $ms;
 }
 
-sub as_string {
+sub format_chunk {
 	my $self = shift;
-	my ( $idx ) = @_;
-	my $time = join ' --> ', map { $self->format_time( $_ ) } $self->from, $self->to;
-	( my $text = $self->text ) =~ s!\n*\z!!;
+	my ( $chunk, $idx ) = @_;
+	my $time = join ' --> ', map { $self->format_time( $_ ) } $chunk->from, $chunk->to;
+	( my $text = $chunk->text ) =~ s!\n*\z!!;
 	join "\n", $idx, $time, $text, '';
 }
 
-sub parse_stream {
-	my $self = shift;
-	my $stream = shift;
-	map $self->parse( $_, @_ ), $self->split( $stream );
-}
 
-
-package Chunk::SRT; ############################################################
-use parent -norequire => 'Chunk';
-
-sub parse_time {
-	my $invocant = shift;
-	my ( $time ) = @_;
-	$time =~ /\A(?<h>\d\d):(?<m>\d\d):(?<s>\d\d),(?<ms>\d{3})\z/
-		or return;
-	my $t = 1000 * ( 60 * ( 60 * $+{h} + $+{m} ) + $+{s} ) + $+{ms};
-	return $t;
-}
-
-sub parse {
-	my $self = shift->new;
-	my ( $chunk ) = @_;
-	( undef, my $time, $self->text ) = split /\n/, $chunk, 3;
-	( $self->from, $self->to ) = map { $self->parse_time( $_ ) } split / --> /, $time;
-	return $self;
-}
-
-sub split { split /\n\s*\n/, $_[1] }
-
-
-package Chunk::MicroDVD; ########################################### .SUB format
-use parent -norequire => 'Chunk';
+package Stream::MicroDVD; ########################################## .SUB format
+use parent -norequire => 'Stream';
 
 sub parse_frames {
-	my $invocant = shift;
+	my $self = shift;
 	my ( $frames, $fps ) = @_;
 	return if not defined $frames;
 	return ( $frames * 1000.0 ) / $fps;
 }
 
-sub parse {
-	my $self = shift->new;
+sub parse_chunk {
+	my $self = shift;
 	my ( $chunk, $fps ) = @_;
 	$chunk =~ m/\A\{(\d+)\}\{(\d+)\}(.+)\z/s or return;
-	( $self->from, $self->to ) = map { $self->parse_frames( $_, $fps ) } $1, $2;
-	( $self->text = $3 . "\n" ) =~ s!\|!\n!g;
-	return $self;
+	my ( $from, $to ) = map { $self->parse_frames( $_, $fps ) } $1, $2;
+	( my $text = $3 . "\n" ) =~ s!\|!\n!g;
+	return Chunk->new( from => $from, to => $to, text => $text );
 }
 
 sub split { split /\n/, $_[1] }
 
 
-package Chunk::SAMI; ########################################### .SMI format
-use parent -norequire => 'Chunk';
+package Stream::SAMI; ############################################## .SMI format
+use parent -norequire => 'Stream';
 
-sub parse {
-	my $self = shift->new;
+sub parse_chunk {
+	my $self = shift;
 	my ( $chunk ) = @_;
 
 	$chunk =~ s/<sync(?: ([^>]*))?>//si or return;
 	my ( undef, %attr ) = split / *(\w+)=/, $1;
 	do { my @k = keys %attr; @attr{ map lc, @k } = delete @attr{ @k } };
-	( $self->from, $self->to ) = @attr{ qw( start end ) };
+	my ( $from, $to ) = @attr{ qw( start end ) };
 
 	require HTML::Entities;
 
-	for ( $self->text = $chunk ) {
+	my $text = $chunk;
+	for ( $text ) {
 		s!</sync *>!!;
 		s!(?<=\w) *\n[\n ]*(?=\w)! !g;
 		s!\n+!!g;
@@ -175,7 +183,7 @@ sub parse {
 		$_ .= "\n";
 	}
 
-	return $self;
+	return Chunk->new( from => $from, to => $to, text => $text );
 }
 
 sub split { $_[1] =~ m!<body(?: [^>]*)?>(.*)</body>!sgi ? split /(?=<sync[ >])/i, $1 : () }
