@@ -151,8 +151,6 @@ sub parse {
 	my $self = shift->new;
 	my ( $chunk ) = @_;
 
-	use Data::Dump 'pp';
-
 	$chunk =~ s/<sync(?: ([^>]*))?>//si or return;
 	my ( undef, %attr ) = split / *(\w+)=/, $1;
 	do { my @k = keys %attr; @attr{ map lc, @k } = delete @attr{ @k } };
