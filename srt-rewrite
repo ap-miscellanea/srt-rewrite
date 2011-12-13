@@ -40,11 +40,12 @@ sub parse_cmdline_time {
 
 	binmode STDOUT, ':crlf' if $slurp =~ s/\r//g;
 
-	my @chunk =
-		$opt_sub ? Stream::MicroDVD->parse( $slurp, $opt_sub ) :
-		$opt_smi ? Stream::SAMI    ->parse( $slurp )           :
-		do {       Stream::SRT     ->parse( $slurp ) }
-		;
+	my $stream =
+		$opt_sub ? Stream::MicroDVD->new( fps => $opt_sub ) :
+		$opt_smi ? Stream::SAMI->new :
+		do       { Stream::SRT->new };
+
+	my @chunk = $stream->parse( $slurp );
 
 	if ( defined $opt_from and defined $opt_until ) {
 		say STDERR "Stretching subtitles from $opt_from to $opt_until";
@@ -131,19 +132,20 @@ sub format_chunk {
 
 package Stream::MicroDVD; ########################################## .SUB format
 use parent -norequire => 'Stream';
+use Object::Tiny::Lvalue qw( fps );
 
 sub parse_frames {
 	my $self = shift;
-	my ( $frames, $fps ) = @_;
+	my ( $frames ) = @_;
 	return if not defined $frames;
-	return ( $frames * 1000.0 ) / $fps;
+	return ( $frames * 1000.0 ) / $self->fps;
 }
 
 sub parse_chunk {
 	my $self = shift;
-	my ( $chunk, $fps ) = @_;
+	my ( $chunk ) = @_;
 	$chunk =~ m/\A\{(\d+)\}\{(\d+)\}(.+)\z/s or return;
-	my ( $from, $to ) = map { $self->parse_frames( $_, $fps ) } $1, $2;
+	my ( $from, $to ) = map { $self->parse_frames( $_ ) } $1, $2;
 	( my $text = $3 . "\n" ) =~ s!\|!\n!g;
 	return Chunk->new( from => $from, to => $to, text => $text );
 }
