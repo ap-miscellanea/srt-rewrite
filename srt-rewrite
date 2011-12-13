@@ -73,18 +73,9 @@ use Object::Tiny::Lvalue qw( from to text );
 package Stream; ################################################################
 use Object::Tiny::Lvalue qw( chunk );
 
-sub parse_chunk { die }
-
-sub split { die }
+sub parse { die }
 
 sub chunks { @{ shift->chunk // [] } }
-
-sub parse {
-	my $self = shift;
-	my $stream = shift;
-	push @{ $self->chunk }, $self->parse_chunk( $_, @_ )
-		for $self->split( $stream );
-}
 
 sub from {
 	my $self = shift;
@@ -96,8 +87,33 @@ sub from {
 }
 
 
-package Stream::SRT; ###########################################################
+package Stream::Simple; ########################################################
 use parent -norequire => 'Stream';
+
+sub parse_chunk { die }
+
+sub split { die }
+
+sub parse {
+	my $self = shift;
+	my @chunk = map {
+		my ( $from, $to, $text ) = $self->parse_chunk( $_, @_ );
+		Chunk->new( from => $from, to => $to, text => $text );
+	} $self->split( @_ );
+	$self->chunk = \@chunk;
+}
+
+sub format_chunk { die }
+
+sub print {
+	my $self = shift;
+	my $i;
+	say $self->format_chunk( $_, ++$i ) for $self->chunks;
+}
+
+
+package Stream::SRT; ###########################################################
+use parent -norequire => 'Stream::Simple';
 
 sub parse_time {
 	my $self = shift;
@@ -113,7 +129,7 @@ sub parse_chunk {
 	my ( $chunk ) = @_;
 	( undef, my $time, my $text ) = split /\n/, $chunk, 3;
 	my ( $from, $to ) = map { $self->parse_time( $_ ) } split / --> /, $time;
-	return Chunk->new( from => $from, to => $to, text => $text );
+	return ( $from, $to, $text );
 }
 
 sub split { split /\n\s*\n/, $_[1] }
@@ -138,15 +154,9 @@ sub format_chunk {
 	join "\n", $idx, $time, $text, '';
 }
 
-sub print {
-	my $self = shift;
-	my $i;
-	say $stream->format_chunk( $_, ++$i ) for $self->chunks;
-}
-
 
 package Stream::MicroDVD; ########################################## .SUB format
-use parent -norequire => 'Stream';
+use parent -norequire => 'Stream::Simple';
 use Object::Tiny::Lvalue qw( fps );
 
 sub parse_frames {
@@ -162,14 +172,14 @@ sub parse_chunk {
 	$chunk =~ m/\A\{(\d+)\}\{(\d+)\}(.+)\z/s or return;
 	my ( $from, $to ) = map { $self->parse_frames( $_ ) } $1, $2;
 	( my $text = $3 . "\n" ) =~ s!\|!\n!g;
-	return Chunk->new( from => $from, to => $to, text => $text );
+	return ( $from, $to, $text );
 }
 
 sub split { split /\n/, $_[1] }
 
 
 package Stream::SAMI; ############################################## .SMI format
-use parent -norequire => 'Stream';
+use parent -norequire => 'Stream::Simple';
 
 sub parse_chunk {
 	my $self = shift;
@@ -200,7 +210,7 @@ sub parse_chunk {
 		$_ .= "\n";
 	}
 
-	return Chunk->new( from => $from, to => $to, text => $text );
+	return ( $from, $to, $text );
 }
 
 sub split { $_[1] =~ m!<body(?: [^>]*)?>(.*)</body>!sgi ? split /(?=<sync[ >])/i, $1 : () }
