@@ -24,6 +24,7 @@ sub parse_cmdline_time {
 		'until|u=s' => sub { $opt_until = parse_cmdline_time $_[1] },
 		'sub=s'     => \( my $opt_sub ),
 		'sami'      => \( my $opt_smi ),
+		'aegi'      => \( my $opt_ass ),
 	) or exit 1;
 
 	if ( defined $opt_sub ) {
@@ -43,6 +44,7 @@ sub parse_cmdline_time {
 	my $stream =
 		$opt_sub ? Stream::MicroDVD->new( fps => $opt_sub ) :
 		$opt_smi ? Stream::SAMI->new :
+		$opt_ass ? Stream::Aegisub->new :
 		do       { Stream::SRT->new };
 
 	$stream->parse( $slurp );
@@ -214,3 +216,44 @@ sub parse_chunk {
 }
 
 sub split { $_[1] =~ m!<body(?: [^>]*)?>(.*)</body>!sgi ? split /(?=<sync[ >])/i, $1 : () }
+
+
+package Stream::Aegisub; ########################################### .ASS format
+use parent -norequire => 'Stream';
+
+sub parse_time {
+	my $self = shift;
+	my ( $time ) = @_;
+	$time =~ /\A(?<h>\d+):(?<m>\d\d):(?<s>\d\d)\.(?<cs>\d\d)\z/
+		or return;
+	my $t = 1000 * ( 60 * ( 60 * $+{h} + $+{m} ) + $+{s} ) + $+{cs} * 10;
+	return $t;
+}
+
+sub parse {
+	my $self = shift;
+	my ( $have_events, @column, @dialogue );
+
+	for ( split /\n\s*/, shift ) {
+		s!\s+\z!!;
+		$have_events = 1, next if '[Events]' eq $_;
+		$have_events = 0 if /^\[\S+\]\z/;
+		next unless $have_events;
+		@column = split /\s*,\s*/ if s!^Format: !!;
+		push @dialogue, $_ if s!^Dialogue: !!;
+	}
+
+	my %row;
+	my @chunk = map {
+		@row{ @column } = split /,/, $_, 0+@column;
+		my ( $from, $to, $text ) = @row{ qw( Start End Text ) };
+		$text =~ s!\\N!\n!g;
+		Chunk->new(
+			from => $self->parse_time( $from ),
+			to   => $self->parse_time( $to ),
+			text => $text,
+		);
+	} @dialogue;
+
+	$self->chunk = \@chunk;
+}
